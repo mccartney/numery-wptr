@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Plate rectangle (white with dark border) -->
+    <path
+        android:pathData="M20,34 L88,34 Q90,34 90,36 L90,72 Q90,74 88,74 L20,74 Q18,74 18,72 L18,36 Q18,34 20,34 Z"
+        android:fillColor="#FFFFFF"
+        android:strokeColor="#333333"
+        android:strokeWidth="1.5" />
+
+    <!-- EU blue stripe -->
+    <path
+        android:pathData="M18,36 Q18,34 20,34 L30,34 L30,74 L20,74 Q18,74 18,72 Z"
+        android:fillColor="#003DA5" />
+
+    <!-- Stars circle (simplified ring) -->
+    <group>
+        <!-- 12 stars in a circle, center at 24,48 radius 5 -->
+        <path android:pathData="M24,43 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M26.5,43.7 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M28.2,45.5 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M28.8,48 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M28.2,50.5 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M26.5,52.3 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M24,53 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M21.5,52.3 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M19.8,50.5 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M19.2,48 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M19.8,45.5 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+        <path android:pathData="M21.5,43.7 l0.5,1.1 1.2,0.2 -0.85,0.8 0.2,1.2 -1.05,-0.55 -1.05,0.55 0.2,-1.2 -0.85,-0.8 1.2,-0.2Z" android:fillColor="#FFD700" />
+    </group>
+
+    <!-- Plate text "WN" -->
+    <path
+        android:pathData="M40,62 L44,46 L47,56 L50,46 L54,62"
+        android:strokeColor="#000000"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M58,62 L58,46 L68,62 L68,46"
+        android:strokeColor="#000000"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

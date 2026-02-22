@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="plate_background">#FFFFFF</color>
+    <color name="plate_border">#333333</color>
+    <color name="plate_text">#000000</color>
+    <color name="eu_stripe">#003DA5</color>
+    <color name="eu_stars">#FFD700</color>
+    <color name="district_text">#555555</color>
+    <color name="date_text">#888888</color>
+    <color name="app_background">#F0F0F0</color>
+</resources>

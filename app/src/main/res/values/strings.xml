@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Numery WPTR</string>
+    <string name="loading">Pobieranie danych…</string>
+    <string name="error_prefix">Błąd: %1$s</string>
+</resources>

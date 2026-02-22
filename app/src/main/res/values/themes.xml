@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.NumeryWPTR" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="colorPrimary">@color/eu_stripe</item>
+        <item name="colorPrimaryVariant">#002D7A</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="android:windowBackground">@color/app_background</item>
+    </style>
+</resources>
