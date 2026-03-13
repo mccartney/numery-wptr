@@ -1,0 +1,855 @@
+#!/usr/bin/env python3
+"""
+Extract license plate characters from Dz.U. 2024/1709 PDF.
+Pipeline: extract PDF images → upscale → threshold → fill outlines (respecting holes)
+          → remove dimension annotations → potrace → Kotlin
+"""
+import os, subprocess, re, sys
+from collections import deque
+from PIL import Image, ImageFilter, ImageOps, ImageDraw
+import numpy as np
+import cv2
+import fitz  # PyMuPDF
+
+WORK = "/tmp/plate-chars"
+PDF = "/tmp/D20241709.pdf"
+
+# Letter order on page 57 (no Q in Polish plates)
+LETTERS = list("ABCDEFGHIJKLMNOPRSTUVWXYZ")  # 25 letters
+
+# Per-character margin overrides: (left, top, right, bottom) as fractions
+# Default is 0.12 on all sides
+MARGIN_OVERRIDES = {
+    'G': (0.12, 0.15, 0.15, 0.12),
+    'W': (0.12, 0.12, 0.12, 0.12),
+    'A': (0.12, 0.18, 0.18, 0.12),
+}
+
+
+# Characters that need distance-transform-based fill
+# (standard flood fill fails due to openings or connected annotations)
+DT_FILL_CHARS = {'G', 'W', 'A'}
+
+
+def get_page_images_sorted(doc, page_num, row_gap=40):
+    """Get images from page with correct bbox↔xref mapping, sorted in reading order.
+    Uses y-clustering instead of fixed quantization to handle slight y-variations within rows.
+    """
+    page = doc[page_num]
+    info = page.get_image_info(xrefs=True)
+    # Sort by y first
+    info.sort(key=lambda im: im['bbox'][1])
+    # Cluster into rows: images within row_gap of each other are in the same row
+    rows = []
+    current_row = []
+    for im in info:
+        y = im['bbox'][1]
+        if current_row and y - current_row[0]['bbox'][1] > row_gap:
+            rows.append(current_row)
+            current_row = []
+        current_row.append(im)
+    if current_row:
+        rows.append(current_row)
+    # Sort within each row by x
+    result = []
+    for row in rows:
+        row.sort(key=lambda im: im['bbox'][0])
+        for im in row:
+            result.append((im['bbox'], im['xref']))
+    return result
+
+
+def extract_image(doc, xref):
+    """Extract a single image from PDF as PIL Image."""
+    pix = fitz.Pixmap(doc, xref)
+    if pix.n > 4:
+        pix = fitz.Pixmap(fitz.csRGB, pix)
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    return img
+
+
+# --- Image processing ---
+
+def draw_char_programmatic(ch, scale=3):
+    """
+    Draw characters G, W, A programmatically using regulation dimensions.
+    Letters: 47mm wide × 80mm tall, 9mm stroke width (samochodowe).
+    Returns a PIL Image with the filled character (black on white).
+    """
+    import math
+    # Resolution: scale pixels per mm-unit (we work in mm, draw at high res)
+    PPM = 10  # 10px per mm → 470×800 px images
+    W_mm, H_mm, S = 47.0, 80.0, 9.0
+    W_px, H_px = int(W_mm * PPM), int(H_mm * PPM)
+
+    img = np.ones((H_px, W_px), dtype=np.uint8) * 255
+
+    def mm2px(x, y):
+        return (int(x * PPM), int(y * PPM))
+
+    if ch == 'A':
+        # A: trapezoid with triangular hole
+        # Outer: two legs from bottom corners meeting at flat cap at top
+        cap_w = 13.0  # flat cap width at top
+        cap_l = (W_mm - cap_w) / 2  # 17mm from left edge
+        cap_r = cap_l + cap_w  # 30mm
+
+        outer = np.array([mm2px(cap_l, 0), mm2px(cap_r, 0),
+                          mm2px(W_mm, H_mm), mm2px(0, H_mm)], np.int32)
+        cv2.fillPoly(img, [outer], 0)
+
+        # Inner hole: triangle between legs above crossbar
+        # Left inner edge: offset right from outer left edge by stroke width
+        # Outer left: (0, 80) → (17, 0), direction = (17, -80)
+        dx, dy = cap_l, -H_mm
+        length = math.sqrt(dx * dx + dy * dy)
+        # Normal pointing right (inward): (dy, -dx) normalized, then ×stroke
+        nx, ny = -dy / length * S, dx / length * S  # perpendicular offset
+
+        # Crossbar position (top of crossbar) - approximately at 60% height
+        bar_top_y = 50.0  # mm from top
+        bar_bot_y = bar_top_y + S
+
+        # Inner left edge: parallel to outer, offset by stroke width inward
+        # At y=0: x = cap_l + nx ≈ 17 + 8.8 = 25.8  (but capped at cap center)
+        # At y=bar_top_y: x = nx + (cap_l/H_mm) * (H_mm - bar_top_y)
+        # Parametric: outer left goes from (0, 80) to (17, 0)
+        # At y: x_outer = cap_l * (1 - y/H_mm)  → x_outer = 17*(80-y)/80
+        # Inner: x_inner = x_outer + nx
+
+        # Simpler: compute inner edge points
+        # Inner left at crossbar top
+        x_il_bar = cap_l * (1 - bar_top_y / H_mm) + nx
+        # Inner right at crossbar top
+        x_ir_bar = W_mm - (W_mm - cap_r) * (1 - bar_top_y / H_mm) - nx
+        # Inner left at top (where inner edges meet or form a narrow gap)
+        x_il_top = cap_l + nx
+        x_ir_top = cap_r - nx
+
+        # Triangular hole
+        hole_apex_y = max(S * 2, bar_top_y * 0.35)  # apex of triangle
+        x_il_apex = cap_l * (1 - hole_apex_y / H_mm) + nx
+        x_ir_apex = W_mm - (W_mm - cap_r) * (1 - hole_apex_y / H_mm) - nx
+
+        hole = np.array([
+            mm2px((x_il_apex + x_ir_apex) / 2, hole_apex_y),
+            mm2px(x_ir_bar, bar_top_y),
+            mm2px(x_il_bar, bar_top_y),
+        ], np.int32)
+        cv2.fillPoly(img, [hole], 255)
+
+        # Crossbar gap (space between two legs below crossbar)
+        # Below the crossbar, the two legs are separate - white space between them
+        # This is already handled since we only drew the outer trapezoid
+
+    elif ch == 'W':
+        # W: flat top, two V-notches going DOWN from the top, bottom is pointed/angled
+        # Looking at the raw image: W has 3 peaks at top and 2 valleys pointing down
+        # The outer boundary: straight across the top, down left side, pointed bottom
+        # with two inner V-notches cut from the top
+
+        # W is essentially the outline of: \/\/
+        # Flat top edge, with two V-shaped cuts from above
+        # Bottom converges to points
+
+        # From the raw W image proportions:
+        # - Flat top at y=0, full width
+        # - Two V notches going downward about 55% of height
+        # - Bottom has a center point at about 95% height
+        # - Two bottom valleys at about 40% from center
+
+        notch_depth = 45.0  # V notches go this far down from top
+        bottom_y = H_mm  # bottom of character
+
+        # X positions of the 3 top peaks and 2 bottom valleys
+        # Top peaks (where the V's meet at top): evenly spaced
+        peak1_x = 0.0  # left edge
+        peak2_x = W_mm / 2  # center
+        peak3_x = W_mm  # right edge
+
+        # Valley bottoms (centers of the V notches)
+        val1_x = W_mm / 4  # 11.75mm
+        val2_x = 3 * W_mm / 4  # 35.25mm
+
+        # Outer contour of W (clockwise from top-left):
+        outer = np.array([
+            mm2px(0, 0),           # top-left
+            mm2px(W_mm, 0),        # top-right
+            mm2px(W_mm, 0),        # start right side
+            mm2px(val2_x + S / 2, bottom_y),  # bottom-right of right V
+            mm2px(peak2_x, bottom_y - notch_depth + S),  # center peak bottom
+            mm2px(val1_x - S / 2, bottom_y),  # bottom-left of left V
+            mm2px(0, 0),           # back to top-left
+        ], np.int32)
+        cv2.fillPoly(img, [outer], 0)
+
+        # Cut the two V-shaped white notches from top
+        notch1 = np.array([
+            mm2px(0 + S, 0),             # inner left of left peak
+            mm2px(val1_x, notch_depth),   # bottom of left notch
+            mm2px(peak2_x - S / 2, 0),   # inner right of center peak
+        ], np.int32)
+        cv2.fillPoly(img, [notch1], 255)
+
+        notch2 = np.array([
+            mm2px(peak2_x + S / 2, 0),   # inner left of center peak
+            mm2px(val2_x, notch_depth),   # bottom of right notch
+            mm2px(W_mm - S, 0),           # inner right of right peak
+        ], np.int32)
+        cv2.fillPoly(img, [notch2], 255)
+
+    elif ch == 'G':
+        # G: C-shape (arc) with horizontal bar at mid-right
+        # Outer arc: from ~330° to ~210° (opening on the right)
+        # Inner arc: same center, smaller radius
+        # Horizontal bar from 3 o'clock position toward center
+
+        cx_mm, cy_mm = W_mm / 2, H_mm / 2
+        # The arc is slightly vertically elongated to fill 47×80
+        # Outer radii
+        rx_out = W_mm / 2  # 23.5mm
+        ry_out = H_mm / 2 - 2  # ~38mm (slightly less than half height for margins)
+        rx_in = rx_out - S
+        ry_in = ry_out - S
+
+        # Opening angle: the gap in G is at about 2-3 o'clock
+        # Opening from about -30° to +30° (60° gap)
+        gap_half = 28  # degrees from horizontal (right side)
+
+        # Bar: horizontal, from opening to about center-x, at cy
+        bar_left = cx_mm - 2  # bar extends slightly past center
+        bar_right = W_mm  # to the right edge of the character
+        bar_top = cy_mm - S / 2
+        bar_bot = cy_mm + S / 2
+
+        # Draw outer arc as filled ellipse, then cut inner ellipse
+        # Use cv2.ellipse to draw filled arcs
+        center = mm2px(cx_mm, cy_mm)
+        axes_out = (int(rx_out * PPM), int(ry_out * PPM))
+        axes_in = (int(rx_in * PPM), int(ry_in * PPM))
+
+        # Draw full outer ellipse, then cut the gap
+        cv2.ellipse(img, center, axes_out, 0, 0, 360, 0, -1)
+
+        # Cut inner ellipse (creates the hollow)
+        cv2.ellipse(img, center, axes_in, 0, 0, 360, 255, -1)
+
+        # Cut the gap (opening on the right side)
+        # Wedge-shaped cut from center to right, angle ±gap_half from horizontal
+        gap_pts = [mm2px(cx_mm, cy_mm)]
+        for angle in range(-gap_half, gap_half + 1, 2):
+            rad = math.radians(angle)
+            gx = cx_mm + (rx_out + 5) * math.cos(rad)
+            gy = cy_mm - (ry_out + 5) * math.sin(rad)
+            gap_pts.append(mm2px(gx, gy))
+        cv2.fillPoly(img, [np.array(gap_pts, np.int32)], 255)
+
+        # Draw horizontal bar
+        bar = np.array([
+            mm2px(bar_left, bar_top),
+            mm2px(bar_right, bar_top),
+            mm2px(bar_right, bar_bot),
+            mm2px(bar_left, bar_bot),
+        ], np.int32)
+        cv2.fillPoly(img, [bar], 0)
+
+    # Convert to PIL and return at appropriate scale
+    result = Image.fromarray(img)
+    return result
+
+
+def fill_outlines(img, scale=3, threshold=160, min_hole_area=80, char_name=None):
+    """
+    Fill character outlines using distance transform + morphological reconstruction.
+    Works for characters where standard flood fill fails (G, W, A).
+
+    Strategy:
+    1. Distance transform finds points deep inside character strokes (far from outlines)
+    2. These "seed" points are grown using morphological reconstruction (constrained by
+       the white regions of the binary image) to fill each stroke interior completely
+    3. Seed components from background (touching edges) and annotation boxes (compact shape)
+       are filtered out before growing
+    """
+    ch = char_name.split('_')[1] if char_name and '_' in char_name else None
+    ml, mt, mr, mb = MARGIN_OVERRIDES.get(ch, (0.12, 0.12, 0.12, 0.12))
+
+    w, h = img.size
+    cropped = img.crop((int(w * ml), int(h * mt), w - int(w * mr), h - int(h * mb)))
+
+    cw, ch_h = cropped.size
+    big = cropped.resize((cw * scale, ch_h * scale), Image.LANCZOS)
+    W, H = big.size
+
+    gray = np.array(big.convert('L'))
+    _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+
+    # Light dilation to close small gaps in outlines
+    dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    binary_closed = cv2.erode(binary, dilate_k)  # erode white = dilate black
+
+    # Distance transform: distance from each white pixel to nearest black pixel
+    dist = cv2.distanceTransform(binary_closed, cv2.DIST_L2, 5)
+
+    # Seed threshold: character strokes ~75px wide at 3x → center distance ~37px
+    # Annotation lines ~6px → center ~3px. Label boxes ~40px → center ~20px.
+    dt_thresh = scale * 8  # 24px at 3x
+    _, seeds = cv2.threshold(dist, dt_thresh, 255, cv2.THRESH_BINARY)
+    seeds = seeds.astype(np.uint8)
+
+    # Remove seed components touching edges (background)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(seeds)
+    edge_labels = set()
+    edge_labels.update(labels[0, :].tolist())
+    edge_labels.update(labels[-1, :].tolist())
+    edge_labels.update(labels[:, 0].tolist())
+    edge_labels.update(labels[:, -1].tolist())
+    edge_labels.discard(0)
+
+    for lbl in range(1, num_labels):
+        if lbl in edge_labels:
+            seeds[labels == lbl] = 0
+            continue
+        # Filter out compact (non-elongated) seed components = annotation boxes
+        # Character stroke seeds are elongated; annotation box seeds are compact
+        sw = stats[lbl, cv2.CC_STAT_WIDTH]
+        sh = stats[lbl, cv2.CC_STAT_HEIGHT]
+        area = stats[lbl, cv2.CC_STAT_AREA]
+        if sw > 0 and sh > 0:
+            aspect = max(sw, sh) / min(sw, sh)
+            solidity = area / (sw * sh) if sw * sh > 0 else 0
+            # Annotation boxes: roughly square (aspect < 2) and solid (> 0.4)
+            # Stroke seeds: elongated (aspect > 2) or very thin
+            if aspect < 1.8 and solidity > 0.35 and area > 100:
+                seeds[labels == lbl] = 0
+
+    # Create a spatial constraint mask from seeds (prevents reconstruction leaking
+    # through character openings like G's gap into the exterior)
+    grow_size = int(dt_thresh * 2.0)
+    if grow_size % 2 == 0:
+        grow_size += 1
+    grow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow_size, grow_size))
+    spatial_mask = cv2.dilate(seeds, grow_kernel)
+
+    # Morphological reconstruction: grow seeds within white regions of binary
+    marker = seeds.copy()
+    mask = binary_closed.copy()
+    kernel_3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    while True:
+        grown = cv2.dilate(marker, kernel_3)
+        grown = cv2.min(grown, mask)
+        if np.array_equal(grown, marker):
+            break
+        marker = grown
+
+    # Constrain reconstruction result with the spatial mask
+    # This prevents leaking through openings (G) into the exterior
+    marker = cv2.min(marker, spatial_mask)
+
+    # Create result: black where strokes are filled OR where original had black outlines
+    result = binary_closed.copy()
+    result[marker > 0] = 0
+
+    # Morphological opening to clean edges
+    result_img = Image.fromarray(result)
+    result_img = result_img.filter(ImageFilter.MaxFilter(5))
+    result_img = result_img.filter(ImageFilter.MinFilter(5))
+
+    # Keep largest black component
+    result_img = keep_largest_component(result_img)
+
+    # Check aspect ratio - trim annotation artifacts (like W's dimension box)
+    bb = ImageOps.invert(result_img).getbbox()
+    if bb:
+        bw_r = bb[2] - bb[0]
+        bh_r = bb[3] - bb[1]
+        ratio = bw_r / bh_r if bh_r > 0 else 1
+        if ratio > 0.85:
+            arr_r = 255 - np.array(result_img)
+            for erode_size in [9, 15, 21, 27]:
+                kernel_e = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                                     (erode_size, erode_size))
+                eroded = cv2.erode(arr_r, kernel_e)
+                nl, lab, stats_e, _ = cv2.connectedComponentsWithStats(eroded)
+                if nl > 1:
+                    largest_l = 1 + int(np.argmax(stats_e[1:, cv2.CC_STAT_AREA]))
+                    mask_l = ((lab == largest_l) * 255).astype(np.uint8)
+                    dilated_back = cv2.dilate(mask_l, cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE, (erode_size + 6, erode_size + 6)))
+                    candidate_arr = arr_r & dilated_back
+                    cbb = cv2.boundingRect(candidate_arr)
+                    if cbb[2] > 0 and cbb[3] > 0:
+                        cr = cbb[2] / cbb[3]
+                        if cr <= 0.85:
+                            result_img = Image.fromarray(255 - candidate_arr)
+                            break
+
+    # Clean dashed lines in holes
+    result_img = clean_hole_lines(result_img, max_thickness=scale * 2)
+
+    return result_img
+
+
+def fill_outlines(img, scale=3, threshold=160, min_hole_area=80, char_name=None):
+    """
+    Fill outlined character shapes, correctly handling holes.
+    Original working algorithm: no margin crop, largest-region selection, MinFilter(3).
+    Dispatches to programmatic drawing for G, W, A.
+    """
+    ch = char_name.split('_')[1] if char_name and '_' in char_name else None
+
+    # G, W, A are drawn programmatically (extraction doesn't work for them)
+    if ch in DT_FILL_CHARS:
+        return draw_char_programmatic(ch, scale)
+
+    w, h = img.size
+    big = img.resize((w * scale, h * scale), Image.LANCZOS)
+    W, H = big.size
+
+    g = big.convert('L')
+    bw = g.point(lambda x: 0 if x < threshold else 255)
+
+    # Dilate black to close outline gaps
+    bw = bw.filter(ImageFilter.MinFilter(3))
+
+    # Flood fill from (0,0) to identify background
+    bordered = ImageOps.expand(bw, border=2, fill=255)
+    ImageDraw.floodfill(bordered, (0, 0), 128, thresh=0)
+    filled = bordered.crop((2, 2, bordered.width - 2, bordered.height - 2))
+
+    px = filled.load()
+
+    # Find connected white (255) regions via BFS
+    visited = bytearray(W * H)
+    regions = []
+
+    for sy in range(H):
+        for sx in range(W):
+            idx = sy * W + sx
+            if visited[idx] or px[sx, sy] != 255:
+                continue
+            region = []
+            queue = deque([(sx, sy)])
+            while queue:
+                cx, cy = queue.popleft()
+                ci = cy * W + cx
+                if cx < 0 or cy < 0 or cx >= W or cy >= H:
+                    continue
+                if visited[ci] or px[cx, cy] != 255:
+                    continue
+                visited[ci] = 1
+                region.append((cx, cy))
+                queue.append((cx + 1, cy))
+                queue.append((cx - 1, cy))
+                queue.append((cx, cy + 1))
+                queue.append((cx, cy - 1))
+            regions.append(region)
+
+    regions.sort(key=len, reverse=True)
+
+    area_threshold = min_hole_area * scale * scale
+
+    result = Image.new('L', (W, H), 255)
+    rpx = result.load()
+
+    # Copy black outlines
+    for y in range(H):
+        for x in range(W):
+            if px[x, y] == 0:
+                rpx[x, y] = 0
+
+    if regions:
+        # Fill largest region (character body)
+        for x, y in regions[0]:
+            rpx[x, y] = 0
+        # Fill small regions (artifacts)
+        for region in regions[1:]:
+            if len(region) < area_threshold:
+                for x, y in region:
+                    rpx[x, y] = 0
+
+    # Morphological opening to clean edges
+    result = result.filter(ImageFilter.MaxFilter(5))
+    result = result.filter(ImageFilter.MinFilter(5))
+
+    # Keep largest component
+    result = keep_largest_component(result)
+
+    # Clean dashed lines in holes
+    result = clean_hole_lines(result, max_thickness=scale * 2)
+
+    return result
+
+
+def find_black_components(arr):
+    """Find all connected black components in a binary image array."""
+    H, W = arr.shape
+    visited = np.zeros((H, W), dtype=bool)
+    components = []
+
+    for sy in range(H):
+        for sx in range(W):
+            if visited[sy, sx] or arr[sy, sx] != 0:
+                continue
+            component = []
+            queue = deque([(sx, sy)])
+            while queue:
+                cx, cy = queue.popleft()
+                if cx < 0 or cy < 0 or cx >= W or cy >= H:
+                    continue
+                if visited[cy, cx] or arr[cy, cx] != 0:
+                    continue
+                visited[cy, cx] = True
+                component.append((cx, cy))
+                queue.append((cx + 1, cy))
+                queue.append((cx - 1, cy))
+                queue.append((cx, cy + 1))
+                queue.append((cx, cy - 1))
+            components.append(component)
+
+    components.sort(key=len, reverse=True)
+    return components
+
+
+def keep_largest_component(img):
+    """Keep only the largest black connected component."""
+    arr = np.array(img)
+    H, W = arr.shape
+    components = find_black_components(arr)
+    if not components:
+        return img
+    result = np.full((H, W), 255, dtype=np.uint8)
+    for x, y in components[0]:
+        result[y, x] = 0
+    return Image.fromarray(result)
+
+
+def keep_largest_component_mask(img, width, height):
+    """Return a mask (numpy array) with only the largest black component."""
+    arr = np.array(img)
+    components = find_black_components(arr)
+    result = np.full((arr.shape[0], arr.shape[1]), 255, dtype=np.uint8)
+    if components:
+        for x, y in components[0]:
+            result[y, x] = 0
+    return result
+
+
+def clean_hole_lines(img, max_thickness=6):
+    """Remove thin black features inside white holes (dashed dimension lines).
+
+    For each black pixel, check if it's part of a thin horizontal or vertical feature
+    that is fully surrounded by white above+below or left+right.
+    Only remove features thinner than max_thickness.
+    """
+    arr = np.array(img)
+    H, W = arr.shape
+    result = arr.copy()
+
+    # Find white hole regions (connected white components NOT touching edges)
+    hole_mask = np.zeros((H, W), dtype=bool)
+    visited = np.zeros((H, W), dtype=bool)
+
+    for sy in range(H):
+        for sx in range(W):
+            if visited[sy, sx] or arr[sy, sx] != 255:
+                continue
+            region = []
+            touches_edge = False
+            queue = deque([(sx, sy)])
+            while queue:
+                cx, cy = queue.popleft()
+                if cx < 0 or cy < 0 or cx >= W or cy >= H:
+                    continue
+                if visited[cy, cx] or arr[cy, cx] != 255:
+                    continue
+                visited[cy, cx] = True
+                region.append((cx, cy))
+                if cx == 0 or cy == 0 or cx == W - 1 or cy == H - 1:
+                    touches_edge = True
+                queue.append((cx + 1, cy))
+                queue.append((cx - 1, cy))
+                queue.append((cx, cy + 1))
+                queue.append((cx, cy - 1))
+
+            if not touches_edge:
+                # This is a hole - mark it
+                for rx, ry in region:
+                    hole_mask[ry, rx] = True
+
+    # For each black pixel adjacent to a hole, check if it's a thin feature
+    for y in range(H):
+        for x in range(W):
+            if arr[y, x] != 0:
+                continue
+            # Check if this pixel is adjacent to or inside a hole region
+            near_hole = False
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < H and 0 <= nx < W and hole_mask[ny, nx]:
+                        near_hole = True
+                        break
+                if near_hole:
+                    break
+
+            if not near_hole:
+                continue
+
+            # Measure vertical thickness at this x
+            y0 = y
+            while y0 > 0 and arr[y0 - 1, x] == 0:
+                y0 -= 1
+            y1 = y
+            while y1 < H - 1 and arr[y1 + 1, x] == 0:
+                y1 += 1
+            vthick = y1 - y0 + 1
+
+            # Measure horizontal thickness at this y
+            x0 = x
+            while x0 > 0 and arr[y, x0 - 1] == 0:
+                x0 -= 1
+            x1 = x
+            while x1 < W - 1 and arr[y, x1 + 1] == 0:
+                x1 += 1
+            hthick = x1 - x0 + 1
+
+            # If thin in at least one direction, remove
+            if vthick <= max_thickness or hthick <= max_thickness:
+                result[y, x] = 255
+
+    return Image.fromarray(result)
+
+
+def tight_bbox(img):
+    inv = ImageOps.invert(img.convert('L'))
+    return inv.getbbox()
+
+
+def process_char(img, name):
+    """Full pipeline for one character image."""
+    filled = fill_outlines(img, char_name=name)
+    bb = tight_bbox(filled)
+    if not bb:
+        return None
+    tight = filled.crop(bb)
+    tight.save(f"{WORK}/clean_{name}.png")
+
+    pbm = tight.point(lambda x: 0 if x < 128 else 255, '1')
+    pbm_path = f"{WORK}/{name}.pbm"
+    pbm.save(pbm_path)
+
+    svg_path = f"{WORK}/{name}.svg"
+    subprocess.run(['potrace', pbm_path, '-s', '-o', svg_path, '--tight'],
+                   check=True, capture_output=True)
+    return svg_path
+
+
+# --- SVG → Kotlin ---
+
+def parse_svg(path):
+    with open(path) as f:
+        svg = f.read()
+    m = re.search(r'viewBox="([^"]+)"', svg)
+    if m:
+        parts = m.group(1).split()
+        vw, vh = float(parts[2]), float(parts[3])
+    else:
+        vw, vh = 100, 100
+    paths = re.findall(r'\bd="([^"]+)"', svg)
+    return vw, vh, ' '.join(paths)
+
+
+def parse_path_data(d):
+    tokens = re.findall(
+        r'[MLCQSTAZmlcqstazHhVv]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?', d)
+    cmds = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.isalpha():
+            cmd = t; i += 1
+            coords = []
+            while i < len(tokens) and not tokens[i].isalpha():
+                coords.append(float(tokens[i])); i += 1
+            cmds.append((cmd, coords))
+        else:
+            i += 1
+    return cmds
+
+
+def transform_cmds(cmds, sx, sy, tx, ty):
+    out = []
+    for cmd, coords in cmds:
+        if cmd in ('Z', 'z'):
+            out.append((cmd, []))
+        else:
+            nc = []
+            for j in range(0, len(coords), 2):
+                nc.append(round(coords[j] * sx + tx, 2))
+                nc.append(round(coords[j + 1] * sy + ty, 2))
+            out.append((cmd, nc))
+    return out
+
+
+def cmds_to_kotlin(cmds):
+    lines = []
+    for cmd, coords in cmds:
+        if cmd == 'M':
+            for j in range(0, len(coords), 2):
+                fn = "moveTo" if j == 0 else "lineTo"
+                lines.append(f"        {fn}({coords[j]}f, {coords[j+1]}f)")
+        elif cmd in ('L', 'l'):
+            for j in range(0, len(coords), 2):
+                lines.append(f"        lineTo({coords[j]}f, {coords[j+1]}f)")
+        elif cmd == 'C':
+            for j in range(0, len(coords), 6):
+                if j + 5 < len(coords):
+                    c = coords[j:j + 6]
+                    lines.append(f"        cubicTo({c[0]}f, {c[1]}f, {c[2]}f, {c[3]}f, {c[4]}f, {c[5]}f)")
+        elif cmd in ('Z', 'z'):
+            lines.append("        close()")
+    return '\n'.join(lines)
+
+
+def svg_to_result(svg_path, target_w, target_h):
+    vw, vh, d = parse_svg(svg_path)
+    cmds = parse_path_data(d)
+    scaled = transform_cmds(cmds, target_w / vw, -target_h / vh, 0, target_h)
+    return cmds_to_kotlin(scaled)
+
+
+# --- Main ---
+
+def main():
+    os.makedirs(WORK, exist_ok=True)
+    doc = fitz.open(PDF)
+    results = {}
+
+    # === PAGE 57: Letters ===
+    print("=== Letters (page 57) ===")
+    imgs57 = get_page_images_sorted(doc, 56, row_gap=40)
+    print(f"  Found {len(imgs57)} images, expecting {len(LETTERS)}")
+
+    for i, (bbox, xref) in enumerate(imgs57):
+        if i >= len(LETTERS):
+            break
+        ch = LETTERS[i]
+        print(f"  {ch} (xref={xref})...", end=" ", flush=True)
+        img = extract_image(doc, xref)
+        svg = process_char(img, f"L_{ch}")
+        if svg:
+            code = svg_to_result(svg, 47.0, 80.0)
+            results[ch] = (47.0, 80.0, code)
+            print("OK")
+        else:
+            print("FAILED")
+
+    # === PAGE 58: Digits 1,2,4,6,7,9,0 ===
+    print("\n=== Digits (page 58) ===")
+    imgs58 = get_page_images_sorted(doc, 57, row_gap=40)
+    digit_imgs58 = [(bb, xref) for bb, xref in imgs58 if (bb[3] - bb[1]) > 60]
+    digits_p58 = ['1', '2', '4', '6', '7', '9', '0']
+    print(f"  Found {len(digit_imgs58)} digit images, expecting {len(digits_p58)}")
+
+    for i, (bbox, xref) in enumerate(digit_imgs58):
+        if i >= len(digits_p58):
+            break
+        ch = digits_p58[i]
+        print(f"  {ch} (xref={xref})...", end=" ", flush=True)
+        img = extract_image(doc, xref)
+        svg = process_char(img, f"D_{ch}")
+        if svg:
+            code = svg_to_result(svg, 43.0, 80.0)
+            results[ch] = (43.0, 80.0, code)
+            print("OK")
+        else:
+            print("FAILED")
+
+    # === PAGE 59: Digits 3,5,8 ===
+    print("\n=== Digits (page 59) ===")
+    imgs59 = get_page_images_sorted(doc, 58, row_gap=40)
+    big_imgs59 = [(bb, xref) for bb, xref in imgs59 if (bb[3] - bb[1]) > 60]
+    rows = {}
+    for bb, xref in big_imgs59:
+        row_key = round(bb[1] / 80)
+        if row_key not in rows:
+            rows[row_key] = (bb, xref)
+    row_items = sorted(rows.values(), key=lambda x: x[0][1])
+
+    digits_p59 = ['3', '5', '8']
+    print(f"  Found {len(row_items)} digit images, expecting {len(digits_p59)}")
+
+    for i, (bbox, xref) in enumerate(row_items):
+        if i >= len(digits_p59):
+            break
+        ch = digits_p59[i]
+        print(f"  {ch} (xref={xref})...", end=" ", flush=True)
+        img = extract_image(doc, xref)
+        svg = process_char(img, f"D_{ch}")
+        if svg:
+            code = svg_to_result(svg, 43.0, 80.0)
+            results[ch] = (43.0, 80.0, code)
+            print("OK")
+        else:
+            print("FAILED")
+
+    return results
+
+
+def generate_kotlin(results):
+    char_funcs = []
+    when_cases = []
+
+    for ch in sorted(results.keys(), key=lambda c: (c.isdigit(), c)):
+        tw, th, code = results[ch]
+        safe = ch if ch.isalpha() else f"_{ch}"
+        func_name = f"build{safe}"
+        char_funcs.append(f"""    private fun {func_name}() = Path().apply {{
+        fillType = Path.FillType.EVEN_ODD
+{code}
+    }}""")
+        when_cases.append(f"        '{ch}' -> {func_name}() to {tw}f")
+
+    kotlin = f"""package pl.waw.oledzki.wptr
+
+import android.graphics.Path
+
+/**
+ * Polish license plate character paths traced from Dz.U. 2024 poz. 1709, pp. 57-59.
+ * Generated via potrace vectorization of the official regulation drawings.
+ * Letters: 47x80mm, Digits: 43x80mm (samochodowe).
+ */
+object PlateFont {{
+    const val H = 80f
+
+    private val cache = mutableMapOf<Char, Pair<Path, Float>>()
+
+    fun get(c: Char): Pair<Path, Float> = cache.getOrPut(c) {{ build(c) }}
+
+    private fun build(c: Char): Pair<Path, Float> = when (c) {{
+{chr(10).join(when_cases)}
+        else -> Path() to 20f
+    }}
+
+{chr(10).join(char_funcs)}
+}}
+"""
+    out_path = f"{WORK}/PlateFont.kt"
+    with open(out_path, 'w') as f:
+        f.write(kotlin)
+    print(f"\nGenerated: {out_path}")
+    return out_path
+
+
+if __name__ == '__main__':
+    results = main()
+    if results:
+        kt = generate_kotlin(results)
+        n = len(results)
+        expected = set("ABCDEFGHIJKLMNOPRSTUVWXYZ0123456789")
+        missing = expected - set(results.keys())
+        print(f"\nProcessed {n}/35 characters")
+        if missing:
+            print(f"Missing: {sorted(missing)}")
+    else:
+        print("ERROR: No characters processed!")

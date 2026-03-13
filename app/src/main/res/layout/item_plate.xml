@@ -14,7 +14,7 @@
         android:textColor="@color/district_text"
         android:layout_marginBottom="4dp" />
 
-    <LinearLayout
+    <pl.waw.oledzki.wptr.PlateLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
@@ -47,21 +47,16 @@
         </LinearLayout>
 
         <!-- Plate number -->
-        <TextView
+        <pl.waw.oledzki.wptr.PlateTextView
             android:id="@+id/plateNumber"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:textSize="48sp"
-            android:textColor="@color/plate_text"
-            android:fontFamily="@font/plate_font"
-            android:letterSpacing="0.05"
-            android:paddingStart="8dp"
-            android:paddingEnd="12dp"
-            android:paddingTop="2dp"
-            android:paddingBottom="2dp"
-            android:includeFontPadding="false" />
-    </LinearLayout>
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="48sp"
+            android:paddingStart="10dp"
+            android:paddingEnd="14dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp" />
+    </pl.waw.oledzki.wptr.PlateLayout>
 
     <TextView
         android:id="@+id/dateText"
