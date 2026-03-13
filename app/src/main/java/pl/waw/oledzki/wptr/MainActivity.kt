@@ -107,7 +107,7 @@ class MainActivity : AppCompatActivity() {
         for (entry in entries) {
             val view = inflater.inflate(R.layout.item_plate, container, false)
             view.findViewById<TextView>(R.id.districtName).text = entry.districtName
-            view.findViewById<TextView>(R.id.plateNumber).text = entry.plateNumber
+            view.findViewById<PlateTextView>(R.id.plateNumber).setPlateText(entry.plateNumber)
             view.findViewById<TextView>(R.id.dateText).text = entry.date
             container.addView(view)
         }
