@@ -1,4 +1,3 @@
-- EU logo in euroband
 - Bigger plates
 - refresh by scrolling up
 - other districts

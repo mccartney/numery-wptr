@@ -28,14 +28,12 @@
             android:orientation="vertical"
             android:gravity="center">
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="★★★★\n★  ★\n★★★★"
-                android:textColor="@color/eu_stars"
-                android:textSize="4sp"
-                android:lineSpacingExtra="-2dp"
-                android:gravity="center" />
+            <ImageView
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:src="@drawable/eu_stars"
+                android:scaleType="fitCenter"
+                android:contentDescription="EU" />
 
             <TextView
                 android:layout_width="wrap_content"
