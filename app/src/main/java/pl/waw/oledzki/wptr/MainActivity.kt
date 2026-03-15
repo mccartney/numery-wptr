@@ -6,6 +6,7 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -37,11 +38,17 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        findViewById<SwipeRefreshLayout>(R.id.swipeRefresh).setOnRefreshListener {
+            fetchPlates()
+        }
+
         fetchPlates()
     }
 
     private fun fetchPlates() {
         val statusText = findViewById<TextView>(R.id.statusText)
+        val swipeRefresh = findViewById<SwipeRefreshLayout>(R.id.swipeRefresh)
+        statusText.visibility = View.VISIBLE
         statusText.text = getString(R.string.loading)
 
         CoroutineScope(Dispatchers.Main).launch {
@@ -59,6 +66,8 @@ class MainActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 statusText.text = getString(R.string.error_prefix, e.message)
+            } finally {
+                swipeRefresh.isRefreshing = false
             }
         }
     }
@@ -102,6 +111,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun displayPlates(entries: List<PlateEntry>) {
         val container = findViewById<LinearLayout>(R.id.platesContainer)
+        container.removeAllViews()
         val inflater = LayoutInflater.from(this)
 
         for (entry in entries) {
