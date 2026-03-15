@@ -63,9 +63,12 @@ class PlateTextView @JvmOverloads constructor(
     /** Strip spaces and get the plain character sequence. */
     private val plainText: String get() = text.replace(" ", "")
 
+    /** Index in plain text where the district prefix ends (position of space in original). */
+    private val districtPrefixLen: Int get() = text.indexOf(' ').let { if (it < 0) -1 else it }
+
     /** Gap after the character at plain-text index [plainIdx]. */
     private fun gapAfter(plainIdx: Int): Float =
-        if (plainIdx == 1) DISTRICT_GAP_MM else CHAR_GAP_MM
+        if (plainIdx == districtPrefixLen - 1) DISTRICT_GAP_MM else CHAR_GAP_MM
 
     /** Total content width in mm. */
     private fun measureContentWidthMm(): Float {
