@@ -1,8 +1,11 @@
 package pl.waw.oledzki.wptr
 
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.LayoutInflater
 import android.view.View
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -23,9 +26,10 @@ class MainActivity : AppCompatActivity() {
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    private val targetIds = setOf("360", "365", "368")
+    private val favoriteIds = setOf("360", "365", "368")
+    private val favoriteOrder = listOf("368", "360", "365")
 
-    private val displayOrder = listOf("368", "360", "365")
+    private var cachedEntries: List<PlateEntry> = emptyList()
 
     data class PlateEntry(
         val id: String,
@@ -41,6 +45,14 @@ class MainActivity : AppCompatActivity() {
         findViewById<SwipeRefreshLayout>(R.id.swipeRefresh).setOnRefreshListener {
             fetchPlates()
         }
+
+        findViewById<EditText>(R.id.searchField).addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                displayFiltered(s?.toString().orEmpty())
+            }
+        })
 
         fetchPlates()
     }
@@ -58,11 +70,14 @@ class MainActivity : AppCompatActivity() {
                     parseEntries(html)
                 }
 
+                cachedEntries = entries
+
                 if (entries.isEmpty()) {
                     statusText.text = "Brak danych"
                 } else {
                     statusText.visibility = View.GONE
-                    displayPlates(entries)
+                    val query = findViewById<EditText>(R.id.searchField).text.toString()
+                    displayFiltered(query)
                 }
             } catch (e: Exception) {
                 statusText.text = getString(R.string.error_prefix, e.message)
@@ -95,8 +110,6 @@ class MainActivity : AppCompatActivity() {
 
         for (match in entryPattern.findAll(html)) {
             val id = match.groupValues[1]
-            if (id !in targetIds) continue
-
             val date = match.groupValues[2].trim()
             val districtName = match.groupValues[3].trim()
             val plateNumber = match.groupValues[4].trim()
@@ -106,8 +119,52 @@ class MainActivity : AppCompatActivity() {
             entries.add(PlateEntry(id, districtName, plateNumber, date))
         }
 
-        return entries.sortedBy { displayOrder.indexOf(it.id) }
+        return entries
     }
+
+    private fun displayFiltered(query: String) {
+        if (cachedEntries.isEmpty()) return
+
+        val statusText = findViewById<TextView>(R.id.statusText)
+        val trimmed = query.trim()
+
+        val entries = if (trimmed.isEmpty()) {
+            cachedEntries
+                .filter { it.id in favoriteIds }
+                .sortedBy { favoriteOrder.indexOf(it.id) }
+        } else {
+            filterEntries(trimmed)
+        }
+
+        if (entries.isEmpty()) {
+            statusText.text = getString(R.string.no_results)
+            statusText.visibility = View.VISIBLE
+        } else {
+            statusText.visibility = View.GONE
+        }
+
+        displayPlates(entries)
+    }
+
+    private fun filterEntries(query: String): List<PlateEntry> {
+        val q = stripDiacritics(query.lowercase())
+        return cachedEntries.filter { entry ->
+            val nameNorm = stripDiacritics(entry.districtName.lowercase())
+            val plateNorm = entry.plateNumber.replace(" ", "").lowercase()
+            nameNorm.contains(q) || plateNorm.startsWith(q)
+        }
+    }
+
+    private fun stripDiacritics(s: String): String = s
+        .replace('ą', 'a')
+        .replace('ć', 'c')
+        .replace('ę', 'e')
+        .replace('ł', 'l')
+        .replace('ń', 'n')
+        .replace('ó', 'o')
+        .replace('ś', 's')
+        .replace('ź', 'z')
+        .replace('ż', 'z')
 
     private fun displayPlates(entries: List<PlateEntry>) {
         val container = findViewById<LinearLayout>(R.id.platesContainer)

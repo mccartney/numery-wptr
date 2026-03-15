@@ -3,4 +3,6 @@
     <string name="app_name">Numery WPTR</string>
     <string name="loading">Pobieranie danych…</string>
     <string name="error_prefix">Błąd: %1$s</string>
+    <string name="search_hint">Szukaj powiatu…</string>
+    <string name="no_results">Brak wyników</string>
 </resources>

@@ -24,7 +24,22 @@
                 android:textSize="24sp"
                 android:textStyle="bold"
                 android:textColor="@color/plate_text"
-                android:layout_marginBottom="24dp" />
+                android:layout_marginBottom="16dp" />
+
+            <EditText
+                android:id="@+id/searchField"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/search_hint"
+                android:inputType="text"
+                android:maxLines="1"
+                android:imeOptions="actionDone"
+                android:background="@drawable/search_background"
+                android:padding="12dp"
+                android:textSize="16sp"
+                android:textColor="@color/plate_text"
+                android:textColorHint="@color/date_text"
+                android:layout_marginBottom="20dp" />
 
             <LinearLayout
                 android:id="@+id/platesContainer"
